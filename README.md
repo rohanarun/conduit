@@ -44,6 +44,33 @@ conduit down me@my-vm
 | `--writable` | read, create, edit, delete (copy-on-write, kept on the sandbox) | never modified |
 | `--write-back-new` | same as `--writable` | files the sandbox **creates** are copied back; existing files are never overwritten or deleted |
 
+## Cookies (sign a sandbox browser in as you)
+
+Export **your own** login cookies for **named sites** so a browser or agent on the
+sandbox is signed in as you:
+
+```bash
+conduit cookies me@my-vm --domain github.com --domain news.ycombinator.com
+conduit cookies me@my-vm --domain app.example.com --browser firefox
+```
+
+It decrypts the cookies on your Mac (macOS prompts for Keychain access on
+Chrome-family browsers), filters to the sites you named, and copies two files to
+`~/.conduit/cookies` on the sandbox:
+
+- `storage_state.json` — load with Playwright/Puppeteer `storageState`
+- `cookies.txt` — Netscape format for `curl --cookie`, `yt-dlp`, etc.
+
+Browsers: `chrome` (default), `brave`, `edge`, `arc`, `firefox`. Chrome's newer
+app-bound-encrypted cookies (v20+) can't be exported and are skipped with a note.
+
+> **This is the one thing in conduit that sends secrets off your machine.** An
+> exported cookie is a logged-in session, usually past 2FA — treat the file like a
+> password. It is **opt-in and per-domain** (there's no "export everything"), asks
+> for confirmation, and writes `600` files into a `700` dir. Export only what you
+> need, delete it when done (`rm -rf ~/.conduit/cookies` on the sandbox), and
+> expect sites that pin a session to a device or location to reject it from a cloud IP.
+
 ## How it works
 
 ```

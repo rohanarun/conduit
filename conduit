@@ -32,6 +32,7 @@ Usage:
   conduit diff   [TARGET] [options]   list files the sandbox added (A), modified (M), deleted (D)
   conduit pull   [TARGET] [options]   copy sandbox-side changes into a review folder
   conduit down   [TARGET] [options]   unmount on the sandbox
+  conduit cookies TARGET --domain H … export your login cookies for named sites to the sandbox
 
 TARGET is anything `ssh` accepts (user@host, a Host alias from ~/.ssh/config).
 
@@ -53,6 +54,14 @@ Options:
   --dest DIR         (pull) review folder (default: ./conduit-pull)
   -h, --help         this help
 
+cookies options:
+  --domain HOST      site to export (repeatable, required); nothing else is exported
+  --browser NAME     chrome (default), brave, edge, arc, or firefox
+  --remote-dir DIR   where to put them on the sandbox (default: ~/.conduit/cookies)
+  -y, --yes          skip the confirmation prompt
+  Writes storage_state.json (Playwright) and cookies.txt (curl/yt-dlp).
+  WARNING: an exported cookie is a logged-in session; treat it like a password.
+
 Environment:
   CONDUIT_SYNC_INTERVAL  seconds between write-back checks (default 5)
   CONDUIT_TMPFS_SIZE     cap for the RAM-backed writable layer, when used (default 4g)
@@ -70,14 +79,14 @@ DEFAULT_HIDE=(.ssh .aws .gnupg .kube .docker .netrc .git-credentials .npmrc .pyp
 # ---------------------------------------------------------------- arguments
 CMD=${1:-}
 case "$CMD" in
-  up|status|diff|pull|down) shift ;;
+  up|status|diff|pull|down|cookies) shift ;;
   -h|--help|help|"") usage; exit 0 ;;
   --version|version) echo "conduit $VERSION"; exit 0 ;;
   *) die "unknown command '$CMD' (try --help)" ;;
 esac
 
 TARGET="" EXEC="" SRC="$HOME" MNT="" MODE=ro WRITEBACK=0 DEST="./conduit-pull" USE_DEFAULT_HIDE=1
-SSH_OPTS=() HIDE=()
+SSH_OPTS=() HIDE=() COOKIE_ARGS=() COOKIE_MNT="" COOKIE_YES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --path)      SRC=${2:?--path needs a value}; shift 2 ;;
@@ -89,6 +98,11 @@ while [ $# -gt 0 ]; do
     --hide)      HIDE+=("${2:?--hide needs a value}"); shift 2 ;;
     --no-default-hide) USE_DEFAULT_HIDE=0; shift ;;
     --dest)      DEST=${2:?--dest needs a value}; shift 2 ;;
+    # cookies-only options
+    --domain)    COOKIE_ARGS+=(--domain "${2:?--domain needs a value}"); shift 2 ;;
+    --browser)   COOKIE_ARGS+=(--browser "${2:?--browser needs a value}"); shift 2 ;;
+    --remote-dir) COOKIE_MNT=${2:?--remote-dir needs a value}; shift 2 ;;
+    --yes|-y)    COOKIE_YES=1; shift ;;
     --rw)        die "--rw was removed: the laptop is never written by the sandbox. See --writable / --write-back-new" ;;
     -h|--help)   usage; exit 0 ;;
     -*)          die "unknown option '$1'" ;;
@@ -243,6 +257,43 @@ cmd_up() {
     sleep $((tries * 2))
   done
   info "stopped"
+}
+
+# Export YOUR OWN cookies for named sites and copy them to the sandbox so a
+# browser/agent there is signed in as you. Opt-in, per-domain, with a warning.
+cmd_cookies() {
+  [ ${#COOKIE_ARGS[@]} -gt 0 ] || die "name at least one site, e.g. conduit cookies $TARGET --domain github.com"
+  local has_domain=0 a; for a in "${COOKIE_ARGS[@]}"; do [ "$a" = --domain ] && has_domain=1; done
+  [ "$has_domain" = 1 ] || die "give --domain HOST (repeatable); conduit never exports every cookie"
+
+  local py; py=$(command -v python3) || die "python3 is required for cookie export"
+  local script; script="$(cd "$(dirname "$0")" && pwd)/cookies.py"
+  [ -f "$script" ] || die "cookies.py not found next to conduit"
+
+  # The sites being exported, for the warning.
+  local sites=""; for ((i=0;i<${#COOKIE_ARGS[@]};i++)); do
+    [ "${COOKIE_ARGS[$i]}" = --domain ] && sites="$sites ${COOKIE_ARGS[$((i+1))]}"; done
+  info "about to copy your logged-in session cookies for:$sites"
+  info "to ${TARGET:-the sandbox}. Anyone with access there can use them as you."
+  if [ "$COOKIE_YES" != 1 ]; then
+    printf 'conduit: type the word yes to continue: ' >&2
+    local reply; read -r reply; [ "$reply" = yes ] || die "aborted"
+  fi
+
+  local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/conduit-ck.XXXXXX")
+  trap 'rm -rf "'"$tmp"'"' EXIT
+  info "exporting locally (macOS may prompt for Keychain access)…"
+  "$py" -I "$script" "${COOKIE_ARGS[@]}" --out-dir "$tmp" >/dev/null || die "cookie export failed"
+
+  local rdir=${COOKIE_MNT:-'$HOME/.conduit/cookies'}
+  info "copying to ${TARGET:-sandbox}:$rdir …"
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "$tmp" -cf - storage_state.json cookies.txt | \
+    remote sh -c 'd='"$rdir"'; mkdir -p "$d" && chmod 700 "$d" && tar -C "$d" -xf - && chmod 600 "$d"/* && echo "$d"' conduit \
+    || die "couldn't copy cookies to the sandbox"
+  info "done. On the sandbox:"
+  info "  Playwright/Puppeteer:  storageState = $rdir/storage_state.json"
+  info "  curl:                  curl --cookie $rdir/cookies.txt https://…"
+  info "delete them when finished:  conduit ... (or rm -rf $rdir on the sandbox)"
 }
 
 cmd_status() { install_helper; helper status; }
