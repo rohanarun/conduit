@@ -17,7 +17,7 @@
 # Runs on macOS's stock bash 3.2. Apache-2.0 licensed.
 
 set -euo pipefail
-VERSION=0.2.4
+VERSION=0.2.6
 
 die()  { printf 'conduit: %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[2mconduit:\033[0m %s\n' "$*" >&2; }
@@ -45,6 +45,12 @@ Options:
   --write-back-new   (implies --writable) copy files the sandbox *creates* back to
                      the laptop. Never overwrites existing laptop files, never
                      deletes, skips dot-paths, Library/ and symlinks
+  --share            SHARED read-write: mount --path read-write (no overlay). A write
+                     on any node goes to the laptop and is seen by every other node
+                     that mounts the same folder with --share. The laptop is the hub.
+                     Point --path at a dedicated folder (not your home). No per-node
+                     hiding. Last-write-wins (no locking). CONDUIT_SHARE_CACHE=<secs>
+                     tunes freshness (default 1; 0 = always fresh but slower).
   --exec 'CMD'       transport other than ssh; CMD runs a program on the sandbox
                      with stdin/stdout attached, e.g.
                        --exec 'docker exec -i mybox'
@@ -104,6 +110,7 @@ while [ $# -gt 0 ]; do
     --mount-at)  MNT=${2:?--mount-at needs a value}; shift 2 ;;
     --writable)  MODE=writable; shift ;;
     --write-back-new) MODE=writable; WRITEBACK=1; shift ;;
+    --share)     MODE=shared; shift ;;
     --exec)      EXEC=${2:?--exec needs a value}; shift 2 ;;
     -o)          SSH_OPTS+=(-o "${2:?-o needs a value}"); shift 2 ;;
     --hide)      HIDE+=("${2:?--hide needs a value}"); shift 2 ;;
@@ -213,6 +220,11 @@ cmd_up() {
     ro0)       info "mode: read-only" ;;
     writable0) info "mode: writable on the sandbox (copy-on-write; laptop untouched)" ;;
     writable1) info "mode: writable on the sandbox + new files copied back to $SRC" ;;
+    shared0)
+      info "mode: SHARED read-write. Writes land on your laptop at $SRC and are"
+      info "      visible to every other node that mounts the same folder with --share."
+      [ "$SRC" = "$HOME" ] && die "refusing to share your whole home folder read-write; point --path at a dedicated folder, e.g. --path ~/conduit-shared"
+      ;;
   esac
 
   mkdir -p "$LOCAL_STATE"
@@ -255,7 +267,9 @@ cmd_up() {
     started=$(date +%s)
     # sftp-server -R  <->  ssh  <->  sshfs -o passive (on the sandbox)
     (
-      "$sftp" -R -d "$SRC" < "$fifo" | helper mount "$MODE" "$SRC" "$MNT" \
+      # -R keeps the laptop read-only; --share drops it so writes sync back and fan out
+      local ro_flag=-R; [ "$MODE" = shared ] && ro_flag=""
+      "$sftp" $ro_flag -d "$SRC" < "$fifo" | helper mount "$MODE" "$SRC" "$MNT" \
           ${HIDE[@]+"${HIDE[@]}"} > "$fifo"
       exit "${PIPESTATUS[1]}"
     ) &
@@ -387,12 +401,14 @@ pkg_install_once() {
 }
 
 cmd_setup() {
+  mode=${1:-ro}
   if ! command -v sshfs >/dev/null 2>&1; then
     log "installing sshfs…"
     if command -v dnf >/dev/null || command -v yum >/dev/null; then pkg_install fuse-sshfs
     else pkg_install sshfs; fi || fatal "sshfs is missing and couldn't be installed (install it on the sandbox, or check root/sudo and network)"
   fi
   [ -e /dev/fuse ] || fatal "no /dev/fuse on this sandbox. FUSE must be allowed (docker: --device /dev/fuse --cap-add SYS_ADMIN)"
+  [ "$mode" = shared ] && { log "ready (shared mode, sshfs $(sshfs --version 2>&1 | awk '/SSHFS version/{print $3; exit}'), root=$ROOTISH)"; return 0; }
   if ! command -v fuse-overlayfs >/dev/null 2>&1; then
     pkg_install fuse-overlayfs >/dev/null 2>&1 || true   # fallback only; best effort
     [ "$ROOTISH" = 1 ] || command -v fuse-overlayfs >/dev/null 2>&1 \
@@ -414,7 +430,31 @@ cmd_mount() {
   # fd 3/4 = the SFTP byte stream from the laptop. Keep stdout clean of chatter.
   exec 3<&0 4>&1 1>&2
 
-  st=$(state_dir "$mnt")
+  st=$(state_dir "$mnt"); mkdir -p "$st"
+
+  # --- shared mode: mount the laptop folder read-write directly (no overlay). All
+  #     nodes point at the same laptop folder, so a write on one shows up on the
+  #     others via the laptop. Low cache timeouts so changes propagate quickly.
+  if [ "$mode" = shared ]; then
+    unmount "$mnt"
+    [ -f "$st/pid" ] && $SUDO kill "$(cat "$st/pid")" 2>/dev/null
+    if [ ! -d "$mnt" ]; then $SUDO mkdir -p "$mnt" || fatal "can't create $mnt"; $SUDO chown "$U:$G" "$mnt" 2>/dev/null || true; fi
+    passive=passive; sshfs -h 2>&1 | grep -q passive || passive=slave
+    t=${CONDUIT_SHARE_CACHE:-1}      # seconds other nodes may lag; 0 = always fresh (slower)
+    opts="$passive,uid=$U,gid=$G,attr_timeout=$t,entry_timeout=$t,ac_attr_timeout=$t"
+    [ "$ROOTISH" = 1 ] && opts="$opts,allow_other"
+    $SUDO sshfs -f -o "$opts" "laptop:$src" "$mnt" <&3 >&4 &
+    pid=$!; exec 3<&- 4>&-; echo "$pid" > "$st/pid"; echo "$mnt" > "$st/lowerdir"
+    i=0; until is_mounted "$mnt"; do
+      kill -0 "$pid" 2>/dev/null || { wait "$pid"; log "sshfs exited before mounting"; exit 1; }
+      i=$((i+1)); [ $i -gt 150 ] && { kill "$pid"; fatal "timed out waiting for sshfs"; }; sleep 0.2
+    done
+    trap 'trap - EXIT INT TERM HUP; unmount "$mnt"; $SUDO kill "$pid" 2>/dev/null' EXIT INT TERM HUP
+    log "shared laptop:$src <-> $mnt (read-write; changes sync to the laptop and every other --share node)"
+    wait "$pid"; log "connection to laptop closed"
+    return 0
+  fi
+
   # take over from a previous connection (dropped, or stale)
   mkdir -p "$st/upper" "$st/work" || fatal "can't create state dir $st"
   unmount "$mnt"

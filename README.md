@@ -57,6 +57,26 @@ conduit down me@my-vm
 | default | read | never modified |
 | `--writable` | read, create, edit, delete (copy-on-write, kept on the sandbox) | never modified |
 | `--write-back-new` | same as `--writable` | files the sandbox **creates** are copied back; existing files are never overwritten or deleted |
+| `--share` | read, create, edit, delete — changes go to the laptop and **fan out to every other `--share` node** | written live |
+
+### Shared folder across many sandboxes
+
+Give several sandboxes one shared read-write folder: a write on any node shows up
+on all the others. Your laptop is the hub, so point `--path` at a dedicated folder
+and run `conduit --share` for each node:
+
+```bash
+conduit up vm-1 --share --path ~/conduit-shared    # in one terminal
+conduit up vm-2 --share --path ~/conduit-shared    # in another
+conduit up vm-3 --share --path ~/conduit-shared    # …
+```
+
+Now `vm-2` sees a file the moment `vm-1` writes it (verified across two sandboxes).
+Good for a shared scratch space, a job queue of distinct files, or logs. Caveats:
+it writes to your laptop (use a dedicated folder, not your home — conduit refuses
+`~`); there's **no locking**, so two nodes writing the *same* file is last-write-wins;
+and other nodes may lag by `CONDUIT_SHARE_CACHE` seconds (default 1; set 0 for
+always-fresh but slower). The laptop must stay online.
 
 ## Cookies (sign a sandbox browser in as you)
 
