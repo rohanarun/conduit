@@ -46,13 +46,20 @@ def domain_matches(host, wanted):
 
 # ----------------------------------------------------------------- Chrome (macOS)
 def chrome_key(keychain_service):
+    account = keychain_service.replace(' Safe Storage', '')  # e.g. "Microsoft Edge"
     try:
         pw = subprocess.check_output(
-            ['security', 'find-generic-password', '-w', '-s', keychain_service, '-a', keychain_service.split()[0]],
+            ['security', 'find-generic-password', '-w', '-s', keychain_service, '-a', account],
             stderr=subprocess.DEVNULL).strip()
     except subprocess.CalledProcessError:
-        raise SystemExit(f"couldn't read the '{keychain_service}' key from your Keychain "
-                         "(cancelled, or this browser isn't installed)")
+        # some builds store the item without the -a account; try service-only
+        try:
+            pw = subprocess.check_output(
+                ['security', 'find-generic-password', '-w', '-s', keychain_service],
+                stderr=subprocess.DEVNULL).strip()
+        except subprocess.CalledProcessError:
+            raise SystemExit(f"couldn't read the '{keychain_service}' key from your Keychain "
+                             "(cancelled, or this browser isn't installed)")
     from hashlib import pbkdf2_hmac
     return pbkdf2_hmac('sha1', pw, b'saltysalt', 1003, 16)
 
@@ -73,13 +80,21 @@ def chrome_decrypt(enc, key):
     return dec.decode('utf-8', 'replace')
 
 CHROME_PATHS = {
-    'chrome':  '~/Library/Application Support/Google/Chrome',
-    'brave':   '~/Library/Application Support/BraveSoftware/Brave-Browser',
-    'edge':    '~/Library/Application Support/Microsoft Edge',
-    'arc':     '~/Library/Application Support/Arc/User Data',
+    'chrome':   '~/Library/Application Support/Google/Chrome',
+    'chrome-beta':   '~/Library/Application Support/Google/Chrome Beta',
+    'chrome-canary': '~/Library/Application Support/Google/Chrome Canary',
+    'brave':    '~/Library/Application Support/BraveSoftware/Brave-Browser',
+    'edge':     '~/Library/Application Support/Microsoft Edge',
+    'arc':      '~/Library/Application Support/Arc/User Data',
+    'opera':    '~/Library/Application Support/com.operasoftware.Opera',
+    'vivaldi':  '~/Library/Application Support/Vivaldi',
+    'chromium': '~/Library/Application Support/Chromium',
 }
-CHROME_KEYCHAIN = {'chrome': 'Chrome Safe Storage', 'brave': 'Brave Safe Storage',
-                   'edge': 'Microsoft Edge Safe Storage', 'arc': 'Arc Safe Storage'}
+CHROME_KEYCHAIN = {'chrome': 'Chrome Safe Storage', 'chrome-beta': 'Chrome Safe Storage',
+                   'chrome-canary': 'Chrome Safe Storage', 'brave': 'Brave Safe Storage',
+                   'edge': 'Microsoft Edge Safe Storage', 'arc': 'Arc Safe Storage',
+                   'opera': 'Opera Safe Storage', 'vivaldi': 'Vivaldi Safe Storage',
+                   'chromium': 'Chromium Safe Storage'}
 
 def read_chrome(browser, domains):
     base = os.path.expanduser(CHROME_PATHS[browser])

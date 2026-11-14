@@ -1,6 +1,6 @@
 {
   "name": "conduit-fs",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Relay your laptop's files, read-only, into cloud VMs and sandboxes. One command, no FUSE on your Mac.",
   "bin": {
     "conduit": "conduit"

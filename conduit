@@ -17,7 +17,7 @@
 # Runs on macOS's stock bash 3.2. Apache-2.0 licensed.
 
 set -euo pipefail
-VERSION=0.2.3
+VERSION=0.2.4
 
 die()  { printf 'conduit: %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[2mconduit:\033[0m %s\n' "$*" >&2; }
@@ -33,6 +33,7 @@ Usage:
   conduit pull   [TARGET] [options]   copy sandbox-side changes into a review folder
   conduit down   [TARGET] [options]   unmount on the sandbox
   conduit cookies TARGET --domain H … export your login cookies for named sites to the sandbox
+  conduit tailscale TARGET --authkey … put the sandbox on your tailnet; --exit-node to borrow a residential IP
 
 TARGET is anything `ssh` accepts (user@host, a Host alias from ~/.ssh/config).
 
@@ -62,6 +63,15 @@ cookies options:
   Writes storage_state.json (Playwright) and cookies.txt (curl/yt-dlp).
   WARNING: an exported cookie is a logged-in session; treat it like a password.
 
+tailscale options:
+  --authkey KEY      Tailscale auth key (tskey-…) or TS_AUTHKEY env; required
+  --exit-node NAME   route the sandbox's internet out through this node (e.g. your
+                     Mac/home), so sites see a residential IP, not the datacenter
+  --hostname NAME    name for the sandbox in your tailnet
+  --tailscale-down   stop Tailscale on the sandbox
+  (Needs root on the sandbox. Without /dev/net/tun it uses userspace mode and
+   prints a local proxy address for apps to use.)
+
 Environment:
   CONDUIT_SYNC_INTERVAL  seconds between write-back checks (default 5)
   CONDUIT_TMPFS_SIZE     cap for the RAM-backed writable layer, when used (default 4g)
@@ -79,7 +89,7 @@ DEFAULT_HIDE=(.ssh .aws .gnupg .kube .docker .netrc .git-credentials .npmrc .pyp
 # ---------------------------------------------------------------- arguments
 CMD=${1:-}
 case "$CMD" in
-  up|status|diff|pull|down|cookies) shift ;;
+  up|status|diff|pull|down|cookies|tailscale) shift ;;
   -h|--help|help|"") usage; exit 0 ;;
   --version|version) echo "conduit $VERSION"; exit 0 ;;
   *) die "unknown command '$CMD' (try --help)" ;;
@@ -87,6 +97,7 @@ esac
 
 TARGET="" EXEC="" SRC="$HOME" MNT="" MODE=ro WRITEBACK=0 DEST="./conduit-pull" USE_DEFAULT_HIDE=1
 SSH_OPTS=() HIDE=() COOKIE_ARGS=() COOKIE_MNT="" COOKIE_YES=0
+TS_AUTHKEY=${TS_AUTHKEY:-} TS_EXIT="" TS_HOSTNAME="" TS_DOWN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --path)      SRC=${2:?--path needs a value}; shift 2 ;;
@@ -103,6 +114,11 @@ while [ $# -gt 0 ]; do
     --browser)   COOKIE_ARGS+=(--browser "${2:?--browser needs a value}"); shift 2 ;;
     --remote-dir) COOKIE_MNT=${2:?--remote-dir needs a value}; shift 2 ;;
     --yes|-y)    COOKIE_YES=1; shift ;;
+    # tailscale-only options
+    --authkey)   TS_AUTHKEY=${2:?--authkey needs a value}; shift 2 ;;
+    --exit-node) TS_EXIT=${2:?--exit-node needs a value}; shift 2 ;;
+    --hostname)  TS_HOSTNAME=${2:?--hostname needs a value}; shift 2 ;;
+    --tailscale-down) TS_DOWN=1; shift ;;
     --rw)        die "--rw was removed: the laptop is never written by the sandbox. See --writable / --write-back-new" ;;
     -h|--help)   usage; exit 0 ;;
     -*)          die "unknown option '$1'" ;;
@@ -294,6 +310,20 @@ cmd_cookies() {
   info "  Playwright/Puppeteer:  storageState = $rdir/storage_state.json"
   info "  curl:                  curl --cookie $rdir/cookies.txt https://…"
   info "delete them when finished:  conduit ... (or rm -rf $rdir on the sandbox)"
+}
+
+# Put the sandbox on your tailnet and (optionally) route its internet traffic out
+# through an exit node — e.g. your Mac/home — so sites see a residential IP, not
+# the datacenter. Useful when a cookie's session is pinned to your usual IP.
+cmd_tailscale() {
+  install_helper
+  if [ "$TS_DOWN" = 1 ]; then helper tailscale-down; return; fi
+  [ -n "$TS_AUTHKEY" ] || die "need a Tailscale auth key: --authkey tskey-… (or TS_AUTHKEY env). Make one at https://login.tailscale.com/admin/settings/keys"
+  case "$TS_AUTHKEY" in tskey-*) ;; *) info "warning: that doesn't look like a tskey-… auth key" ;; esac
+  [ -n "$TS_EXIT" ] && info "will route the sandbox's traffic out through exit node: $TS_EXIT"
+  info "setting up Tailscale on ${TARGET:-the sandbox} (the auth key is sent over your ssh connection, never shown on the command line)…"
+  # auth key goes over stdin, not argv (argv shows up in ps)
+  printf '%s' "$TS_AUTHKEY" | helper tailscale "$TS_EXIT" "$TS_HOSTNAME"
 }
 
 cmd_status() { install_helper; helper status; }
@@ -531,10 +561,63 @@ cmd_newfiles() {
   mv "$st/stamp.next" "$st/stamp"
 }
 
+cmd_tailscale() {
+  exit_node=${1:-}; hostname=${2:-}
+  authkey=$(cat); [ -n "$authkey" ] || fatal "no auth key received"
+  [ "$ROOTISH" = 1 ] || fatal "Tailscale setup needs root or passwordless sudo on the sandbox"
+
+  if ! command -v tailscale >/dev/null 2>&1; then
+    log "installing Tailscale…"
+    if command -v curl >/dev/null 2>&1; then curl -fsSL https://tailscale.com/install.sh | $SUDO sh >&2
+    else pkg_install tailscale; fi || fatal "couldn't install Tailscale"
+  fi
+
+  # TUN gives normal (kernel) routing; without it, fall back to userspace mode,
+  # which exposes a local SOCKS5/HTTP proxy that apps point at instead.
+  mode=kernel; [ -c /dev/net/tun ] || mode=userspace
+  $SUDO pkill tailscaled 2>/dev/null; sleep 1
+  st=$HOME/.conduit/tailscale; mkdir -p "$st"
+  if [ "$mode" = kernel ]; then
+    $SUDO sh -c "tailscaled --state=$st/tailscaled.state --socket=$st/tailscaled.sock >$st/daemon.log 2>&1 &"
+  else
+    log "no /dev/net/tun here — using userspace networking (apps use a local proxy, see below)"
+    $SUDO sh -c "tailscaled --tun=userspace-networking --socks5-server=localhost:1055 --outbound-http-proxy-listen=localhost:1055 --state=$st/tailscaled.state --socket=$st/tailscaled.sock >$st/daemon.log 2>&1 &"
+  fi
+  i=0; until $SUDO tailscale --socket="$st/tailscaled.sock" status >/dev/null 2>&1 || $SUDO tailscale --socket="$st/tailscaled.sock" status 2>&1 | grep -qi 'logged out\|stopped'; do
+    i=$((i+1)); [ $i -gt 50 ] && { cat "$st/daemon.log" >&2; fatal "tailscaled didn't start"; }; sleep 0.2
+  done
+
+  set -- --authkey="$authkey" --accept-routes --accept-dns=false
+  [ -n "$exit_node" ] && set -- "$@" --exit-node="$exit_node" --exit-node-allow-lan-access
+  [ -n "$hostname" ] && set -- "$@" --hostname="$hostname"
+  log "joining tailnet${exit_node:+ (exit node: $exit_node)}…"
+  $SUDO tailscale --socket="$st/tailscaled.sock" up "$@" >&2 || fatal "tailscale up failed (check the auth key / exit-node name in your admin console)"
+
+  ip=$($SUDO tailscale --socket="$st/tailscaled.sock" ip -4 2>/dev/null | head -1)
+  log "on the tailnet as ${hostname:-$(hostname)} (${ip:-no-ip})"
+  if [ -n "$exit_node" ]; then
+    seen=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo '?')
+    log "sandbox's public IP is now: $seen  (should match your exit node, not the datacenter)"
+  fi
+  if [ "$mode" = userspace ]; then
+    log "userspace mode: route apps through the proxy, e.g."
+    log "  export ALL_PROXY=socks5://localhost:1055 HTTPS_PROXY=http://localhost:1055"
+    log "  curl --proxy socks5://localhost:1055 https://api.ipify.org"
+    log "  Playwright/Chromium: --proxy-server=socks5://localhost:1055"
+  fi
+}
+cmd_tailscale_down() {
+  st=$HOME/.conduit/tailscale
+  $SUDO tailscale --socket="$st/tailscaled.sock" down 2>/dev/null
+  $SUDO pkill tailscaled 2>/dev/null
+  log "Tailscale stopped on the sandbox"
+}
+
 sub=$1; shift
 case "$sub" in
   setup) cmd_setup "$@" ;; mount) cmd_mount "$@" ;; down) cmd_down "$@" ;;
   status) cmd_status ;; diff) cmd_diff "$@" ;; pull) cmd_pull "$@" ;; newfiles) cmd_newfiles "$@" ;;
+  tailscale) cmd_tailscale "$@" ;; tailscale-down) cmd_tailscale_down ;;
   *) fatal "unknown helper command $sub" ;;
 esac
 REMOTE

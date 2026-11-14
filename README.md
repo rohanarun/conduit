@@ -61,8 +61,33 @@ Chrome-family browsers), filters to the sites you named, and copies two files to
 - `storage_state.json` — load with Playwright/Puppeteer `storageState`
 - `cookies.txt` — Netscape format for `curl --cookie`, `yt-dlp`, etc.
 
-Browsers: `chrome` (default), `brave`, `edge`, `arc`, `firefox`. Chrome-family browsers need an AES library (`pip install cryptography`, or `pycryptodome`); Firefox needs none. Chrome's newer
-app-bound-encrypted cookies (v20+) can't be exported and are skipped with a note.
+Browsers: `chrome` (default), `chrome-beta`, `chrome-canary`, `brave`, `edge`, `arc`,
+`opera`, `vivaldi`, `chromium`, and `firefox`. Chrome-family browsers need an AES
+library (`pip install cryptography`, or `pycryptodome`); Firefox needs none. Chrome's
+newer app-bound-encrypted cookies (v20+) can't be exported and are skipped with a note.
+Safari isn't supported yet (its cookies are in Apple's binarycookies format behind
+Full Disk Access).
+
+### Borrow a residential IP (Tailscale)
+
+Some sites (banks especially) pin a session to your usual IP and reject a cookie
+used from a datacenter. Put the sandbox on your tailnet and route its traffic out
+through your Mac or home network, so the site sees a residential IP:
+
+```bash
+conduit tailscale me@my-vm --authkey tskey-... --exit-node my-mac
+```
+
+Make an auth key at <https://login.tailscale.com/admin/settings/keys>, and advertise
+your Mac/home as an exit node (`tailscale up --advertise-exit-node`, approved in the
+admin console). The key is sent over your ssh connection, never on the command line.
+Needs root on the sandbox; without `/dev/net/tun` it uses Tailscale userspace mode
+and prints a local SOCKS5/HTTP proxy for apps to use. `--tailscale-down` stops it.
+
+> IP is only one signal. This fixes the datacenter-IP flag, but a strict site may
+> still fingerprint the *device* (TLS/JA3, User-Agent, fonts), so pair it with a
+> browser on the sandbox whose User-Agent matches yours. Automating around a bank's
+> device checks may violate its terms — your account, your call.
 
 > **This is the one thing in conduit that sends secrets off your machine.** An
 > exported cookie is a logged-in session, usually past 2FA — treat the file like a
