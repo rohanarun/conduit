@@ -17,7 +17,7 @@
 # Runs on macOS's stock bash 3.2. Apache-2.0 licensed.
 
 set -euo pipefail
-VERSION=0.2.2
+VERSION=0.2.3
 
 die()  { printf 'conduit: %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[2mconduit:\033[0m %s\n' "$*" >&2; }

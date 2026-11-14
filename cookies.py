@@ -19,6 +19,23 @@ import argparse, base64, binascii, glob, http.cookiejar, json, os, sqlite3, stru
 
 def eprint(*a): print(*a, file=sys.stderr)
 
+def aes_cbc_decrypt(key, iv, data):
+    """AES-CBC decrypt via whatever's installed: cryptography, then pycryptodome."""
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        d = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        return d.update(data) + d.finalize()
+    except ImportError:
+        pass
+    try:
+        from Crypto.Cipher import AES  # pycryptodome
+        return AES.new(key, AES.MODE_CBC, iv).decrypt(data)
+    except ImportError:
+        raise SystemExit(
+            "Chrome-family cookies are encrypted and need an AES library.\n"
+            "  install one:   pip install cryptography    (or: pip install pycryptodome)\n"
+            "  or use Firefox, which needs no library:   conduit cookies ... --browser firefox")
+
 def domain_matches(host, wanted):
     host = host.lstrip('.')
     for w in wanted:
@@ -46,13 +63,7 @@ def chrome_decrypt(enc, key):
     if version not in (b'v10', b'v11'):
         # v20+ = app-bound encryption; not supported here
         raise ValueError('unsupported')
-    try:
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    except ImportError:
-        raise SystemExit("need the 'cryptography' package: pip install cryptography")
-    cipher = Cipher(algorithms.AES(key), modes.CBC(b' ' * 16))
-    d = cipher.decryptor()
-    dec = d.update(enc) + d.finalize()
+    dec = aes_cbc_decrypt(key, b' ' * 16, enc)
     dec = dec[:-dec[-1]]               # strip PKCS7 padding
     if len(dec) >= 32:                 # newer Chrome prefixes a 32-byte SHA256 of the domain
         try:

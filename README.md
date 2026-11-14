@@ -61,7 +61,7 @@ Chrome-family browsers), filters to the sites you named, and copies two files to
 - `storage_state.json` — load with Playwright/Puppeteer `storageState`
 - `cookies.txt` — Netscape format for `curl --cookie`, `yt-dlp`, etc.
 
-Browsers: `chrome` (default), `brave`, `edge`, `arc`, `firefox`. Chrome's newer
+Browsers: `chrome` (default), `brave`, `edge`, `arc`, `firefox`. Chrome-family browsers need an AES library (`pip install cryptography`, or `pycryptodome`); Firefox needs none. Chrome's newer
 app-bound-encrypted cookies (v20+) can't be exported and are skipped with a note.
 
 > **This is the one thing in conduit that sends secrets off your machine.** An
