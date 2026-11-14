@@ -17,7 +17,7 @@
 # Runs on macOS's stock bash 3.2. Apache-2.0 licensed.
 
 set -euo pipefail
-VERSION=0.2.6
+VERSION=0.3.0
 
 die()  { printf 'conduit: %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[2mconduit:\033[0m %s\n' "$*" >&2; }
@@ -27,7 +27,9 @@ usage() {
 conduit — relay your laptop's files, read-only, into cloud VMs and sandboxes
 
 Usage:
-  conduit up     [TARGET] [options]   mount and keep the mirror alive (Ctrl-C to stop)
+  conduit up     [TARGET...] [options] mount and keep the mirror alive (Ctrl-C to stop).
+                                       Give several targets to bring up many sandboxes at once.
+  conduit exec   TARGET [opts] -- CMD  mount, run CMD on the sandbox in the folder, pull results, unmount
   conduit status [TARGET] [options]   show conduit mounts on the sandbox
   conduit diff   [TARGET] [options]   list files the sandbox added (A), modified (M), deleted (D)
   conduit pull   [TARGET] [options]   copy sandbox-side changes into a review folder
@@ -35,7 +37,9 @@ Usage:
   conduit cookies TARGET --domain H … export your login cookies for named sites to the sandbox
   conduit tailscale TARGET --authkey … put the sandbox on your tailnet; --exit-node to borrow a residential IP
 
-TARGET is anything `ssh` accepts (user@host, a Host alias from ~/.ssh/config).
+TARGET is anything `ssh` accepts (user@host, a Host alias from ~/.ssh/config), or
+`daytona:<name|id>` to resolve a Daytona sandbox via its API (needs DAYTONA_API_KEY;
+no ssh config required).
 
 Options:
   --path DIR         laptop folder to share (default: $HOME)
@@ -58,7 +62,9 @@ Options:
   -o OPT             extra ssh option (repeatable), e.g. -o Port=2222
   --hide REL         hide REL (relative to --path) on the sandbox; repeatable
   --no-default-hide  don't hide the built-in list of credential folders
-  --dest DIR         (pull) review folder (default: ./conduit-pull)
+  --prefetch GLOB    warm the sandbox cache by pre-reading matching files (repeatable),
+                     e.g. --prefetch '**/*.py'. Speeds up later reads of big trees.
+  --dest DIR         (pull/exec) results folder (default: ./conduit-pull)
   -h, --help         this help
 
 cookies options:
@@ -84,6 +90,23 @@ Environment:
 EOF
 }
 
+# Resolve a daytona:<name|id> target to a real ssh target via the Daytona API,
+# so you don't need anything in ~/.ssh/config. Needs DAYTONA_API_KEY.
+resolve_daytona() {
+  local q=$1 key=${DAYTONA_API_KEY:-} api=${DAYTONA_API_URL:-https://app.daytona.io/api}
+  [ -n "$key" ] || { echo "set DAYTONA_API_KEY to use daytona: targets" >&2; return 1; }
+  command -v python3 >/dev/null 2>&1 || { echo "python3 required for daytona: targets" >&2; return 1; }
+  local id
+  id=$(curl -fsS -H "Authorization: Bearer $key" "$api/sandbox" 2>/dev/null | python3 -c '
+import json,sys
+q=sys.argv[1]; d=json.load(sys.stdin); items=d.get("items",d) if isinstance(d,dict) else d
+for s in items:
+    if s.get("id")==q or s.get("name")==q: print(s["id"]); break' "$q" 2>/dev/null) || return 1
+  [ -n "$id" ] || { echo "no daytona sandbox named/id '$q'" >&2; return 1; }
+  curl -fsS -X POST -H "Authorization: Bearer $key" "$api/sandbox/$id/ssh-access?expiresInMinutes=120" 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["sshCommand"].split()[-1])' 2>/dev/null
+}
+
 # Credential-ish folders hidden by default. This keeps agents in the sandbox
 # from stumbling into them; it is NOT a security boundary (root on the sandbox
 # can read the raw lower mount). --path is the real boundary.
@@ -95,7 +118,7 @@ DEFAULT_HIDE=(.ssh .aws .gnupg .kube .docker .netrc .git-credentials .npmrc .pyp
 # ---------------------------------------------------------------- arguments
 CMD=${1:-}
 case "$CMD" in
-  up|status|diff|pull|down|cookies|tailscale) shift ;;
+  up|status|diff|pull|down|cookies|tailscale|exec) shift ;;
   -h|--help|help|"") usage; exit 0 ;;
   --version|version) echo "conduit $VERSION"; exit 0 ;;
   *) die "unknown command '$CMD' (try --help)" ;;
@@ -104,13 +127,16 @@ esac
 TARGET="" EXEC="" SRC="$HOME" MNT="" MODE=ro WRITEBACK=0 DEST="./conduit-pull" USE_DEFAULT_HIDE=1
 SSH_OPTS=() HIDE=() COOKIE_ARGS=() COOKIE_MNT="" COOKIE_YES=0
 TS_AUTHKEY=${TS_AUTHKEY:-} TS_EXIT="" TS_HOSTNAME="" TS_DOWN=0
+TARGETS=() PREFETCH=() EXEC_CMD=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --)          shift; EXEC_CMD=("$@"); break ;;   # everything after -- is the exec command
     --path)      SRC=${2:?--path needs a value}; shift 2 ;;
     --mount-at)  MNT=${2:?--mount-at needs a value}; shift 2 ;;
     --writable)  MODE=writable; shift ;;
     --write-back-new) MODE=writable; WRITEBACK=1; shift ;;
     --share)     MODE=shared; shift ;;
+    --prefetch)  PREFETCH+=("${2:?--prefetch needs a glob}"); shift 2 ;;
     --exec)      EXEC=${2:?--exec needs a value}; shift 2 ;;
     -o)          SSH_OPTS+=(-o "${2:?-o needs a value}"); shift 2 ;;
     --hide)      HIDE+=("${2:?--hide needs a value}"); shift 2 ;;
@@ -129,9 +155,14 @@ while [ $# -gt 0 ]; do
     --rw)        die "--rw was removed: the laptop is never written by the sandbox. See --writable / --write-back-new" ;;
     -h|--help)   usage; exit 0 ;;
     -*)          die "unknown option '$1'" ;;
-    *)           [ -z "$TARGET" ] || die "only one TARGET allowed"; TARGET=$1; shift ;;
+    *)           TARGETS+=("$1"); shift ;;
   esac
 done
+# Resolve any daytona:<name|id> targets to real ssh targets (no ssh config needed).
+for i in "${!TARGETS[@]}"; do
+  case "${TARGETS[$i]}" in daytona:*) TARGETS[$i]=$(resolve_daytona "${TARGETS[$i]#daytona:}") || die "could not resolve ${TARGETS[$i]}";; esac
+done
+TARGET=${TARGETS[0]:-}
 [ -n "$TARGET" ] || [ -n "$EXEC" ] || die "give an ssh TARGET or --exec 'CMD' (see --help)"
 [ -d "$SRC" ] || die "--path '$SRC' is not a directory"
 SRC=$(cd "$SRC" && pwd -P)
@@ -214,6 +245,22 @@ writeback_loop() {
 
 # ---------------------------------------------------------------- commands
 cmd_up() {
+  # Many sandboxes in one command: fan out to one `conduit up` per target.
+  if [ "${#TARGETS[@]}" -gt 1 ]; then
+    [ -z "$EXEC" ] || die "--exec takes a single target"
+    info "bringing up ${#TARGETS[@]} sandboxes…"
+    local flags=(--path "$SRC" --mount-at "$MNT")
+    case "$MODE$WRITEBACK" in writable0) flags+=(--writable);; writable1) flags+=(--write-back-new);; shared0) flags+=(--share);; esac
+    local x; for x in ${PREFETCH[@]+"${PREFETCH[@]}"}; do flags+=(--prefetch "$x"); done
+    for x in ${SSH_OPTS[@]+"${SSH_OPTS[@]}"}; do flags+=("$x"); done
+    flags+=(--no-default-hide); for x in ${HIDE[@]+"${HIDE[@]}"}; do flags+=(--hide "$x"); done
+    local pids=() t
+    for t in "${TARGETS[@]}"; do "$0" up "$t" "${flags[@]}" & pids+=($!); done
+    trap 'for p in ${pids[@]+"${pids[@]}"}; do kill -TERM "$p" 2>/dev/null; done' INT TERM HUP
+    local rc=0; for p in "${pids[@]}"; do wait "$p" || rc=1; done
+    return $rc
+  fi
+
   local sftp; sftp=$(find_sftp_server)
   [ "$SRC" = "$HOME" ] && info "sharing your whole home folder; use --path to share less"
   case "$MODE$WRITEBACK" in
@@ -250,10 +297,11 @@ cmd_up() {
   # Each connection runs as its own process group, so stopping kills ssh and
   # sftp-server too, whether we get Ctrl-C, SIGTERM or SIGHUP.
   set -m
-  STOP=0 PGID="" WBPID=""
+  STOP=0 PGID="" WBPID="" PFPID=""
   stop() {
     STOP=1
     [ -z "$WBPID" ] || kill -TERM "$WBPID" 2>/dev/null || true
+    [ -z "$PFPID" ] || kill -TERM "$PFPID" 2>/dev/null || true
     # Unmount first, while sshfs is still alive: some sandboxes (e.g. sysbox) can't
     # unmount a FUSE mount whose process has already died.
     [ -z "$PGID" ] || { info "stopping; unmounting on the sandbox…"; helper down "$MNT" >/dev/null 2>&1 || true; }
@@ -261,6 +309,7 @@ cmd_up() {
   }
   trap stop INT TERM HUP
   if [ "$WRITEBACK" = 1 ]; then writeback_loop & WBPID=$!; fi
+  if [ "${#PREFETCH[@]}" -gt 0 ]; then ( helper prefetch "$MNT" "${PREFETCH[@]}" ) & PFPID=$!; fi
 
   local tries=0 started rc
   while :; do
@@ -338,6 +387,30 @@ cmd_tailscale() {
   info "setting up Tailscale on ${TARGET:-the sandbox} (the auth key is sent over your ssh connection, never shown on the command line)…"
   # auth key goes over stdin, not argv (argv shows up in ps)
   printf '%s' "$TS_AUTHKEY" | helper tailscale "$TS_EXIT" "$TS_HOSTNAME"
+}
+
+# Mount, run a command on the sandbox in the mounted folder, pull new files, unmount.
+#   conduit exec me@vm -- python build.py
+cmd_exec() {
+  [ "${#EXEC_CMD[@]}" -gt 0 ] || die "give a command after --, e.g. conduit exec me@vm -- make"
+  local log; log=$(mktemp "${TMPDIR:-/tmp}/conduit-exec.XXXXXX")
+  info "mounting $SRC on ${TARGET:-sandbox} (writable)…"
+  "$0" up "$TARGET" --path "$SRC" --mount-at "$MNT" --writable > "$log" 2>&1 &
+  local up=$!
+  local ok=0 i
+  for i in $(seq 180); do grep -q "mirroring laptop" "$log" && { ok=1; break; }; kill -0 "$up" 2>/dev/null || break; sleep 1; done
+  [ "$ok" = 1 ] || { cat "$log" >&2; kill "$up" 2>/dev/null; rm -f "$log"; die "mount failed"; }
+  info "running on the sandbox: ${EXEC_CMD[*]}"
+  set +e
+  remote sh -c 'cd "$1" && shift && "$@"' conduit "$MNT" "${EXEC_CMD[@]}"
+  local rc=$?
+  set -e
+  info "pulling results into $DEST…"
+  mkdir -p "$DEST"; helper pull "$MNT" 2>/dev/null | tar -xpf - -C "$DEST" 2>/dev/null || true
+  kill -TERM "$up" 2>/dev/null; wait "$up" 2>/dev/null || true
+  rm -f "$log"
+  info "done (command exit $rc); results in $DEST"
+  return $rc
 }
 
 cmd_status() { install_helper; helper status; }
@@ -653,11 +726,29 @@ cmd_tailscale_down() {
   log "Tailscale stopped on the sandbox"
 }
 
+# Warm the local (sandbox-side) cache by reading files that match the globs, so
+# later reads of a big tree are fast. Waits for the mount, then reads matches.
+cmd_prefetch() {
+  mnt=$1; shift
+  i=0; until is_mounted "$mnt"; do i=$((i+1)); [ $i -gt 120 ] && { log "prefetch: $mnt never mounted"; return 0; }; sleep 1; done
+  n=0
+  for g in "$@"; do
+    case "$g" in
+      '**/'*) set -- -name "${g#**/}" ;;
+      */*)    set -- -path "$mnt/$(echo "$g" | sed 's#\*\*#*#g')" ;;
+      *)      set -- -name "$g" ;;
+    esac
+    cnt=$(find "$mnt" -type f "$@" 2>/dev/null | while IFS= read -r f; do dd if="$f" of=/dev/null bs=1M 2>/dev/null && echo x; done | wc -l)
+    n=$((n + cnt))
+  done
+  log "prefetch: warmed $n file(s) into the sandbox cache"
+}
+
 sub=$1; shift
 case "$sub" in
   setup) cmd_setup "$@" ;; mount) cmd_mount "$@" ;; down) cmd_down "$@" ;;
   status) cmd_status ;; diff) cmd_diff "$@" ;; pull) cmd_pull "$@" ;; newfiles) cmd_newfiles "$@" ;;
-  tailscale) cmd_tailscale "$@" ;; tailscale-down) cmd_tailscale_down ;;
+  tailscale) cmd_tailscale "$@" ;; tailscale-down) cmd_tailscale_down ;; prefetch) cmd_prefetch "$@" ;;
   *) fatal "unknown helper command $sub" ;;
 esac
 REMOTE

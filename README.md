@@ -50,6 +50,11 @@ conduit diff me@my-vm                       # A/M/D list of the sandbox's change
 conduit pull me@my-vm                       # copy them into ./conduit-pull for review
 conduit status me@my-vm
 conduit down me@my-vm
+
+conduit up vm-1 vm-2 vm-3                    # many sandboxes in one command
+conduit up daytona:my-box                   # resolve a Daytona sandbox by name/id (DAYTONA_API_KEY)
+conduit up me@my-vm --prefetch '**/*.py'    # pre-warm the cache for a big tree
+conduit exec me@my-vm -- python build.py    # mount, run, pull results to ./conduit-pull, unmount
 ```
 
 | mode | sandbox can… | laptop files |
@@ -203,11 +208,16 @@ The laptop side must stay compatible with macOS's bash 3.2, and the helper must 
 
 ### Roadmap
 
-- `conduit up a b c …`: one laptop, many sandboxes in a single command
+Done:
+- ✅ `conduit up a b c …`: one laptop, many sandboxes in a single command
+- ✅ local read cache / prefetch for big trees (`--prefetch '**/*.py'`)
+- ✅ `conduit exec me@vm -- cmd`: mount, run, pull results, unmount
+- ✅ Daytona SDK integration: `daytona:<name|id>` targets (no ssh config needed)
+
+Planned:
 - a filtering SFTP server, so hidden paths are enforced on the laptop, not just hidden
-- a local read cache / prefetch for big trees (e.g. `--prefetch '**/*.py'`)
-- `conduit exec me@vm -- cmd`: mount, run, pull results, unmount
-- integrations for E2B / Modal / Daytona SDKs (no ssh config needed)
+  (today hiding is an overlay whiteout; a real laptop-side boundary is the next step)
+- E2B / Modal target resolution (like `daytona:`), once tested against those SDKs
 
 ## Contributors
 
