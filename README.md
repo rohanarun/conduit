@@ -11,6 +11,20 @@ your laptop show up in the sandbox right away. The sandbox can never change your
 laptop's files. Optionally it can write in the same folders on its own copy, and
 optionally the *new* files it creates can be copied back.
 
+## Demo
+
+**Mirror your files into a cloud sandbox and edit them there:**
+
+<video src="https://github.com/rohanarun/conduit/raw/main/media/conduit-demo.mp4" controls width="100%"></video>
+
+▶️ [Watch the file-mirroring demo](media/conduit-demo.mp4)
+
+**Sign a sandbox into a site as you, with your own cookies:**
+
+<video src="https://github.com/rohanarun/conduit/raw/main/media/cookies-demo.mp4" controls width="100%"></video>
+
+▶️ [Watch the cookies demo](media/cookies-demo.mp4)
+
 ## Install
 
 ```bash
