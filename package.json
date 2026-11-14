@@ -1,14 +1,38 @@
 {
   "name": "conduit-fs",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Relay your laptop's files, read-only, into cloud VMs and sandboxes. One command, no FUSE on your Mac.",
-  "bin": { "conduit": "conduit" },
-  "files": ["conduit", "cookies.py", "install.sh", "README.md", "LICENSE", "NOTICE"],
-  "os": ["darwin", "linux"],
-  "keywords": ["sandbox", "sshfs", "fuse", "overlayfs", "remote-development", "ai-agents", "cloud", "mirror"],
+  "bin": {
+    "conduit": "conduit"
+  },
+  "files": [
+    "conduit",
+    "cookies.py",
+    "install.sh",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "keywords": [
+    "sandbox",
+    "sshfs",
+    "fuse",
+    "overlayfs",
+    "remote-development",
+    "ai-agents",
+    "cloud",
+    "mirror"
+  ],
   "license": "Apache-2.0",
   "author": "Rohan Arun",
-  "repository": { "type": "git", "url": "git+https://github.com/rohanarun/conduit.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rohanarun/conduit.git"
+  },
   "homepage": "https://github.com/rohanarun/conduit#readme",
   "bugs": "https://github.com/rohanarun/conduit/issues"
 }
